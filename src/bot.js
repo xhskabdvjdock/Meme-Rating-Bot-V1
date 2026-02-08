@@ -9,16 +9,29 @@ const {
   ButtonBuilder,
   ButtonStyle,
   EmbedBuilder,
+  REST,
 } = require("discord.js");
+
+// Create REST client with increased timeout for large file uploads
+const rest = new REST({ 
+  version: '10',
+  timeout: 300000 // 5 minutes timeout for large files
+}).setToken(process.env.DISCORD_TOKEN);
 
 const { getGuildConfig, setGuildConfig } = require("./configStore");
 const { readPending, upsertPending, removePending } = require("./pendingStore");
+const { getDownloadConfig, setDownloadConfig, isChannelAllowed } = require("./downloadConfigStore");
+const downloadQueue = require("./downloadQueue");
+const { startDashboard } = require("./dashboard");
 const {
   detectVideoUrls,
   getVideoInfo,
+  checkFileSize,
   downloadVideo,
+  getDirectDownloadUrl,
   convertToMp3,
   compressVideo,
+  autoCompressVideo,
   getFileSize,
   deleteFile,
   formatDuration,
@@ -50,6 +63,9 @@ const client = new Client({
     GatewayIntentBits.DirectMessages,
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
+  rest: {
+    timeout: 300000, // 5 minutes timeout for large files
+  },
 });
 
 // لتفادي جدولة نفس الرسالة أكثر من مرة أثناء التشغيل
@@ -138,6 +154,12 @@ function scheduleFinalize(guildId, channelId, messageId, endsAtMs, createdAtMs) 
 client.once("ready", async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
+  // ضبط حالة البوت - dnd + playing
+  client.user.setPresence({
+    activities: [{ name: 'dev by : wlc8', type: 0 }],
+    status: 'dnd'
+  });
+
   // إعادة جدولة المؤقّتات بعد إعادة تشغيل البوت
   const pending = readPending();
   const now = Date.now();
@@ -153,6 +175,10 @@ client.once("ready", async () => {
     }
     scheduleFinalize(record.guildId, record.channelId, messageId, record.endsAtMs, record.createdAtMs || now);
   }
+
+  // بدء Dashboard/Express server
+  startDashboard(client);
+  console.log("[Bot] Dashboard started and ready");
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -160,134 +186,119 @@ client.on("interactionCreate", async (interaction) => {
   if (interaction.isButton()) {
     const customId = interaction.customId;
 
-    // التحقق من أنه زر تحميل
-    if (!customId.startsWith('dl_mp4_') && !customId.startsWith('dl_mp3_')) {
-      return;
-    }
+    // === معالجة أزرار اختيار الجودة ===
+    if (customId.startsWith('quality_')) {
+      const parts = customId.split('_');
+      const quality = parts[1]; // 720, 480, best
+      const format = parts[2]; // mp4 or mp3
+      const ownerId = parts[3];
+      const jobId = parts.slice(4).join('_');
 
-    const parts = customId.split('_');
-    const format = parts[1]; // mp4 أو mp3
-    const ownerId = parts[2];
-    const jobId = parts.slice(3).join('_');
+      // الرد بأن التحميل قيد التحضير (يجب أن يكون أول شيء لتجنب timeout)
+      await interaction.deferReply();
 
-    console.log(`[VideoDownload] Button pressed: ${format} by ${interaction.user.tag}`);
-
-    // التحقق من أن الضاغط هو صاحب الطلب
-    if (interaction.user.id !== ownerId) {
-      await interaction.reply({
-        content: '❌ هذا الزر مخصص لشخص آخر!',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // التحقق من rate limit
-    if (!checkRateLimit(interaction.user.id)) {
-      const resetMs = getRateLimitReset(interaction.user.id);
-      const resetMins = Math.ceil(resetMs / 60000);
-      await interaction.reply({
-        content: `⚠️ تجاوزت الحد المسموح (5 تحميلات في الساعة)\n⏰ يمكنك المحاولة مجدداً بعد ${resetMins} دقيقة`,
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // جلب الـ job
-    const job = getJob(jobId);
-    if (!job) {
-      await interaction.reply({
-        content: '❌ انتهت صلاحية هذا الطلب. أرسل الرابط مجدداً.',
-        ephemeral: true,
-      });
-      return;
-    }
-
-    // الرد بأن التحميل قيد التحضير
-    await interaction.deferReply();
-
-    try {
-      updateJob(jobId, { status: 'downloading' });
-
-      const startTime = Date.now();
-      console.log(`[VideoDownload] Starting download: ${job.url} (${format})`);
-
-      // تحميل الملف
-      let filePath;
-      try {
-        filePath = await downloadVideo(job.url, format, 'best');
-      } catch (err) {
-        throw new Error(`فشل في التحميل: ${err.message}`);
-      }
-
-      updateJob(jobId, { status: 'converting', filePath });
-
-      // إذا mp3 وتم تحميل فيديو، نحوله
-      if (format === 'mp3' && !filePath.endsWith('.mp3')) {
-        try {
-          filePath = await convertToMp3(filePath);
-        } catch (err) {
-          deleteFile(filePath);
-          throw new Error(`فشل في التحويل: ${err.message}`);
-        }
-      }
-
-      // التحقق من الحجم
-      let fileSize = getFileSize(filePath);
-      console.log(`[VideoDownload] File size: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
-
-      // إذا الملف كبير جداً، نحاول الضغط
-      if (fileSize > MAX_FILE_SIZE && format === 'mp4') {
-        console.log(`[VideoDownload] File too large, compressing...`);
-        try {
-          filePath = await compressVideo(filePath);
-          fileSize = getFileSize(filePath);
-        } catch (err) {
-          console.error(`[VideoDownload] Compression failed:`, err.message);
-        }
-      }
-
-      // إذا لا يزال كبيراً
-      if (fileSize > MAX_FILE_SIZE) {
-        deleteFile(filePath);
+      // التحقق من الملكية
+      if (interaction.user.id !== ownerId) {
         await interaction.editReply({
-          content: `❌ الملف كبير جداً (${(fileSize / 1024 / 1024).toFixed(1)}MB)\n💡 جرب تحميل بجودة أقل أو استخدم موقع تحميل خارجي`,
+          content: '❌ هذا الزر مخصص لشخص آخر!',
         });
-        deleteJob(jobId);
         return;
       }
 
-      // إرسال الملف
-      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-      const remaining = getRemainingRequests(interaction.user.id);
+      // جلب الـ job
+      const job = getJob(jobId);
+      if (!job) {
+        await interaction.editReply({
+          content: '❌ انتهت صلاحية هذا الطلب. أرسل الرابط مجدداً.',
+        });
+        return;
+      }
 
-      await interaction.editReply({
-        content: `✅ تم التحميل بنجاح!\n⏱️ الوقت: ${elapsed}ث | 📊 الحجم: ${(fileSize / 1024 / 1024).toFixed(1)}MB\n📥 المتبقي لك: ${remaining} تحميلات في الساعة`,
-        files: [filePath],
-      });
+      // التحقق من rate limit
+      if (!checkRateLimit(interaction.user.id)) {
+        const resetMs = getRateLimitReset(interaction.user.id);
+        const resetMins = Math.ceil(resetMs / 60000);
+        await interaction.editReply({
+          content: `⚠️ تجاوزت الحد المسموح (5 تحميلات في الساعة)\n⏰ يمكنك المحاولة مجدداً بعد ${resetMins} دقيقة`,
+        });
+        return;
+      }
 
-      console.log(`[VideoDownload] Sent file to ${interaction.user.tag} (${elapsed}s)`);
+      // إضافة للـ queue
+      try {
+        await downloadQueue.add(async () => {
+          updateJob(jobId, { status: 'downloading' });
+          const startTime = Date.now();
+          const queueStatus = downloadQueue.getStatus();
+          console.log(`[VideoDownload] Starting download: ${job.url} (${format}, ${quality}) - Queue: ${queueStatus.active}/${queueStatus.total}`);
 
-      // تنظيف
-      deleteFile(filePath);
-      deleteJob(jobId);
+          // تحميل الملف
+          let filePath;
+          try {
+            filePath = await downloadVideo(job.url, format, quality);
+          } catch (err) {
+            throw new Error(`فشل في التحميل: ${err.message}`);
+          }
 
-    } catch (err) {
-      console.error(`[VideoDownload] Error:`, err);
-      updateJob(jobId, { status: 'error', error: err.message });
+          // التحقق من الحجم والضغط التلقائي إذا لزم الأمر
+          let fileSize = getFileSize(filePath);
+          console.log(`[VideoDownload] File size: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
 
-      await interaction.editReply({
-        content: `❌ حدث خطأ: ${err.message}\n💡 تأكد من صلاحية الرابط وجرب مجدداً`,
-      });
+          // إذا الملف كبير جداً (أكثر من 100MB)، نقوم بالضغط التلقائي
+          if (fileSize > MAX_FILE_SIZE) {
+            console.log(`[VideoDownload] File too large (${(fileSize / 1024 / 1024).toFixed(1)}MB), compressing...`);
+            updateJob(jobId, { status: 'compressing' });
+            
+            try {
+              filePath = await autoCompressVideo(filePath, 80); // Target 80MB
+              fileSize = getFileSize(filePath);
+              console.log(`[VideoDownload] Compressed to: ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
+            } catch (compressErr) {
+              console.error('[VideoDownload] Compression failed:', compressErr.message);
+              // Continue with original file if compression fails
+            }
+          }
 
-      deleteJob(jobId);
+          // إرسال رابط التحميل المباشر دائماً (أفضل من إرسال الملف)
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+          const remaining = getRemainingRequests(interaction.user.id);
+
+          try {
+            const directInfo = await getDirectDownloadUrl(job.url, format, quality);
+            
+            await interaction.editReply({
+              content: `✅ **تم التحميل بنجاح!**\n\n🎬 **الجودة:** ${quality}\n⏱️ **الوقت:** ${elapsed} ثانية\n📊 **الحجم:** ${(fileSize / 1024 / 1024).toFixed(1)}MB\n📥 **المتبقي لك:** ${remaining} تحميلات في الساعة\n\n🔗 **رابط التحميل المباشر:**\n\`\`\`${directInfo.url}\`\`\`\n\n💡 **طريقة التحميل:**\n1. انسخ الرابط أعلاه\n2. افتحه في المتصفح\n3. اضغط على الثلاث نقاط (⋮)\n4. اختر "حفظ الفيديو"`,
+            });
+
+            console.log(`[VideoDownload] Sent direct link to ${interaction.user.tag} (${elapsed}s)`);
+          } catch (directErr) {
+            console.error('[VideoDownload] Error getting direct link:', directErr.message);
+            await interaction.editReply({
+              content: `❌ فشل الحصول على رابط التحميل\n💡 جرب اختيار جودة أخرى أو أرسل الرابط مجدداً`,
+            });
+          }
+
+          // تنظيف
+          deleteFile(filePath);
+          deleteJob(jobId);
+        });
+      } catch (err) {
+        console.error(`[VideoDownload] Error:`, err);
+        updateJob(jobId, { status: 'error', error: err.message });
+
+        await interaction.editReply({
+          content: `❌ حدث خطأ: ${err.message}\n💡 تأكد من صلاحية الرابط وجرب مجدداً`,
+        });
+
+        deleteJob(jobId);
+      }
+
+      return;
     }
-
-    return;
   }
 
   // === معالجة الأوامر النصية ===
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== "memerate") return;
   if (!interaction.inGuild()) return;
 
   // السماح فقط لمدير السيرفر (Manage Guild) — كطبقة حماية إضافية
@@ -298,49 +309,144 @@ client.on("interactionCreate", async (interaction) => {
 
   const guildId = interaction.guildId;
   const sub = interaction.options.getSubcommand();
-  const config = getGuildConfig(guildId);
 
-  if (sub === "status") {
-    await interaction.reply({
-      ephemeral: true,
-      content:
-        `**Memerate config**\n` +
-        `- Channels: ${config.enabledChannelIds.length ? config.enabledChannelIds.map((id) => `<#${id}>`).join(", ") : "none"}\n` +
-        `- Duration: ${config.durationMinutes} minutes\n` +
-        `- Emojis: ${config.emojis.positive} / ${config.emojis.negative}`,
-    });
+  // === معالجة أوامر /download ===
+  if (interaction.commandName === "download") {
+    const dlConfig = getDownloadConfig(guildId);
+
+    if (sub === "status") {
+      const channelsText = dlConfig.channels === 'all'
+        ? 'جميع القنوات'
+        : Array.isArray(dlConfig.channels) && dlConfig.channels.length > 0
+          ? dlConfig.channels.map(id => `<#${id}>`).join(', ')
+          : 'لا توجد قنوات محددة';
+
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content:
+          `**إعدادات ميزة التحميل**\n` +
+          `- الحالة: ${dlConfig.enabled ? '✅ مفعّلة' : '❌ معطّلة'}\n` +
+          `- القنوات: ${channelsText}\n` +
+          `- الجودة الافتراضية: ${dlConfig.defaultQuality}`,
+      });
+      return;
+    }
+
+    if (sub === "toggle") {
+      const enabled = interaction.options.getBoolean("enabled", true);
+      setDownloadConfig(guildId, { enabled });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: enabled ? '✅ تم تفعيل ميزة التحميل' : '❌ تم تعطيل ميزة التحميل',
+      });
+      return;
+    }
+
+    if (sub === "addchannel") {
+      const channel = interaction.options.getChannel("channel", true);
+
+      let channels = dlConfig.channels === 'all' ? [] : (Array.isArray(dlConfig.channels) ? dlConfig.channels : []);
+      if (!channels.includes(channel.id)) {
+        channels.push(channel.id);
+      }
+
+      setDownloadConfig(guildId, { channels });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: `✅ تمت إضافة القناة ${channel} لقائمة التحميل`,
+      });
+      return;
+    }
+
+    if (sub === "removechannel") {
+      const channel = interaction.options.getChannel("channel", true);
+
+      let channels = Array.isArray(dlConfig.channels) ? dlConfig.channels : [];
+      channels = channels.filter(id => id !== channel.id);
+
+      setDownloadConfig(guildId, { channels });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: `✅ تمت إزالة القناة ${channel} من قائمة التحميل`,
+      });
+      return;
+    }
+
+    if (sub === "setchannels") {
+      const mode = interaction.options.getString("mode", true);
+      setDownloadConfig(guildId, { channels: mode === 'all' ? 'all' : [] });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: mode === 'all'
+          ? '✅ تم تفعيل التحميل في جميع القنوات'
+          : '✅ تم تحديد نمط القنوات المحددة (استخدم /download addchannel لإضافة قنوات)',
+      });
+      return;
+    }
+
     return;
   }
 
-  if (sub === "setduration") {
-    const minutes = interaction.options.getInteger("minutes", true);
-    const next = setGuildConfig(guildId, { durationMinutes: minutes });
-    await interaction.reply({ ephemeral: true, content: `تم ضبط مدة التصويت إلى **${next.durationMinutes}** دقيقة.` });
-    return;
-  }
+  // === معالجة أوامر /memerate ===
+  if (interaction.commandName === "memerate") {
+    const config = getGuildConfig(guildId);
 
-  if (sub === "setemojis") {
-    const positive = interaction.options.getString("positive", true).trim();
-    const negative = interaction.options.getString("negative", true).trim();
-    const next = setGuildConfig(guildId, { emojis: { positive, negative } });
-    await interaction.reply({ ephemeral: true, content: `تم ضبط الإيموجيات إلى: ${next.emojis.positive} / ${next.emojis.negative}` });
-    return;
-  }
+    if (sub === "status") {
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content:
+          `**Memerate config**\n` +
+          `- Channels: ${config.enabledChannelIds.length ? config.enabledChannelIds.map((id) => `<#${id}>`).join(", ") : "none"}\n` +
+          `- Duration: ${config.durationMinutes} minutes\n` +
+          `- Emojis: ${config.emojis.positive} / ${config.emojis.negative}`,
+      });
+      return;
+    }
 
-  if (sub === "addchannel") {
-    const channel = interaction.options.getChannel("channel", true);
-    const ids = new Set(config.enabledChannelIds);
-    ids.add(channel.id);
-    const next = setGuildConfig(guildId, { enabledChannelIds: Array.from(ids) });
-    await interaction.reply({ ephemeral: true, content: `تمت إضافة القناة ${channel} للمراقبة.` });
-    return;
-  }
+    if (sub === "setduration") {
+      const minutes = interaction.options.getInteger("minutes", true);
+      const next = setGuildConfig(guildId, { durationMinutes: minutes });
+      await interaction.reply({ 
+        flags: [64], // Ephemeral
+        content: `تم ضبط مدة التصويت إلى **${next.durationMinutes}** دقيقة.` 
+      });
+      return;
+    }
 
-  if (sub === "removechannel") {
-    const channel = interaction.options.getChannel("channel", true);
-    const nextIds = config.enabledChannelIds.filter((id) => id !== channel.id);
-    setGuildConfig(guildId, { enabledChannelIds: nextIds });
-    await interaction.reply({ ephemeral: true, content: `تمت إزالة القناة ${channel} من المراقبة.` });
+    if (sub === "setemojis") {
+      const positive = interaction.options.getString("positive", true).trim();
+      const negative = interaction.options.getString("negative", true).trim();
+      const next = setGuildConfig(guildId, { emojis: { positive, negative } });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: `تم ضبط الإيموجيات إلى: ${next.emojis.positive} / ${next.emojis.negative}`,
+      });
+      return;
+    }
+
+    if (sub === "addchannel") {
+      const channel = interaction.options.getChannel("channel", true);
+      const ids = new Set(config.enabledChannelIds);
+      ids.add(channel.id);
+      const next = setGuildConfig(guildId, { enabledChannelIds: Array.from(ids) });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: `تمت إضافة القناة ${channel} للمراقبة.`,
+      });
+      return;
+    }
+
+    if (sub === "removechannel") {
+      const channel = interaction.options.getChannel("channel", true);
+      const nextIds = config.enabledChannelIds.filter((id) => id !== channel.id);
+      setGuildConfig(guildId, { enabledChannelIds: nextIds });
+      await interaction.reply({
+        flags: [64], // Ephemeral
+        content: `تمت إزالة القناة ${channel} من المراقبة.`,
+      });
+      return;
+    }
+
     return;
   }
 });
@@ -356,17 +462,17 @@ client.on("messageCreate", async (message) => {
   // === اكتشاف روابط الفيديو ===
   const videoUrls = detectVideoUrls(message.content);
   if (videoUrls.length > 0) {
+    // التحقق من أن القناة مسموح فيها التحميل
+    if (!isChannelAllowed(guildId, message.channelId)) {
+      return; // لا نفعل شيء إذا القناة غير مسموح فيها
+    }
+
     const firstUrl = videoUrls[0]; // نعالج أول رابط فقط
 
     console.log(`[VideoDownload] Detected ${firstUrl.platform} link from ${message.author.tag}`);
 
-    // حذف الرسالة الأصلية
-    try {
-      await message.delete();
-      console.log(`[VideoDownload] Deleted original message`);
-    } catch (err) {
-      console.error(`[VideoDownload] Failed to delete message:`, err.message);
-    }
+    // لا نحذف الرسالة الأصلية ولا نحمل تلقائياً
+    // نعرض فقط معلومات الفيديو وأزرار التحميل
 
     try {
       // جلب معلومات الفيديو
@@ -390,39 +496,46 @@ client.on("messageCreate", async (message) => {
       const embed = new EmbedBuilder()
         .setColor(0x5865F2)
         .setTitle(`📹 ${videoInfo.title}`)
-        .setDescription(`**المنصة:** ${getPlatformName(firstUrl.platform)}\n**المدة:** ${formatDuration(videoInfo.duration)}\n**الناشر:** ${videoInfo.author}`)
-        .setFooter({ text: `طلب من ${message.author.tag} • اختر صيغة التحميل` });
+        .setDescription(`**المنصة:** ${getPlatformName(firstUrl.platform)}\n**المدة:** ${formatDuration(videoInfo.duration)}\n**الناشر:** ${videoInfo.author}\n\n**الرابط:** ${firstUrl.url}`)
+        .setFooter({ text: `طلب من ${message.author.tag} • اختر الصيغة والجودة للتحميل` });
 
       if (videoInfo.thumbnail) {
         embed.setThumbnail(videoInfo.thumbnail);
       }
 
-      // إنشاء الأزرار
-      const row = new ActionRowBuilder().addComponents(
+      // إنشاء أزرار اختيار الجودة
+      const row1 = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId(`dl_mp4_${message.author.id}_${jobId}`)
-          .setLabel('📥 Download MP4')
+          .setCustomId(`quality_best_mp4_${message.author.id}_${jobId}`)
+          .setLabel('📥 MP4 (Best)')
           .setStyle(ButtonStyle.Primary),
         new ButtonBuilder()
-          .setCustomId(`dl_mp3_${message.author.id}_${jobId}`)
-          .setLabel('🎵 Download MP3')
+          .setCustomId(`quality_720_mp4_${message.author.id}_${jobId}`)
+          .setLabel('📥 MP4 (720p)')
+          .setStyle(ButtonStyle.Primary),
+        new ButtonBuilder()
+          .setCustomId(`quality_480_mp4_${message.author.id}_${jobId}`)
+          .setLabel('📥 MP4 (480p)')
+          .setStyle(ButtonStyle.Primary),
+      );
+
+      const row2 = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`quality_360_mp4_${message.author.id}_${jobId}`)
+          .setLabel('📥 MP4 (360p)')
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`quality_best_mp3_${message.author.id}_${jobId}`)
+          .setLabel('🎵 MP3 (192k)')
           .setStyle(ButtonStyle.Secondary),
       );
 
-      // إرسال DM
+      // إرسال الرسالة في نفس القناة (بدون حذف الرسالة الأصلية)
       try {
-        await message.author.send({ embeds: [embed], components: [row] });
-        console.log(`[VideoDownload] Sent DM to ${message.author.tag}`);
+        await message.reply({ embeds: [embed], components: [row1, row2] });
+        console.log(`[VideoDownload] Sent download options to ${message.author.tag}`);
       } catch (err) {
-        console.error(`[VideoDownload] Failed to send DM:`, err.message);
-        // إذا فشل الـ DM، نرسل في القناة
-        const fallbackMsg = await message.channel.send({
-          content: `<@${message.author.id}>`,
-          embeds: [embed],
-          components: [row],
-        });
-        // حذف بعد 5 دقائق
-        setTimeout(() => fallbackMsg.delete().catch(() => { }), 300000);
+        console.error(`[VideoDownload] Failed to send reply:`, err.message);
       }
     } catch (err) {
       console.error(`[VideoDownload] Error processing video URL:`, err);

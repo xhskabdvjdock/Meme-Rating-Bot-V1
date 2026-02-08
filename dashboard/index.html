@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meme Rate Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+  <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+  <div class="container">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="logo">
+        <h1>Meme Rate</h1>
+        <span>Dashboard</span>
+      </div>
+      <nav class="nav">
+        <a href="#" class="nav-item active" data-page="servers" onclick="showPage('servers')">
+          <img src="icons/servers.png" class="nav-icon" alt="">
+          السيرفرات
+        </a>
+      </nav>
+
+      <!-- Sub Navigation (hidden until server selected) -->
+      <nav class="sub-nav" id="sub-nav" style="display: none;">
+        <div class="sub-nav-title">الأنظمة</div>
+        <a href="#" class="nav-item active" data-system="memerate" onclick="showSystem('memerate')">
+          <img src="icons/memerate.png" class="nav-icon" alt="">
+          Meme Rate
+        </a>
+        <a href="#" class="nav-item" data-system="gif" onclick="showSystem('gif')">
+          <img src="icons/gif.png" class="nav-icon" alt="">
+          GIF Converter
+        </a>
+        <a href="#" class="nav-item" data-system="streak" onclick="showSystem('streak')">
+          🔥
+          Daily Streak
+        </a>
+        <a href="#" class="nav-item" data-system="download" onclick="showSystem('download')">
+          📥
+          Video Downloader
+        </a>
+      </nav>
+
+      <!-- User Profile Section -->
+      <div class="user-section" id="user-section">
+        <!-- سيتم ملؤها بـ JavaScript -->
+        <div class="user-loading">جاري التحميل...</div>
+      </div>
+    </aside>
+
+
+    <!-- Main Content -->
+    <main class="main">
+      <!-- Header -->
+      <header class="header">
+        <h2 id="page-title">السيرفرات</h2>
+        <div class="header-actions">
+          <button class="theme-toggle" onclick="toggleTheme()" title="تبديل الوضع">
+            <span id="theme-icon">🌙</span>
+          </button>
+          <span class="status-indicator online"></span>
+          <span>متصل</span>
+        </div>
+      </header>
+
+      <!-- Content -->
+      <div class="content">
+        <!-- Servers List -->
+        <section id="servers-page" class="page active">
+          <div class="servers-grid" id="servers-list">
+            <div class="loading">جاري التحميل...</div>
+          </div>
+        </section>
+
+        <!-- Meme Rate System -->
+        <section id="memerate-page" class="page">
+          <button class="back-btn" onclick="showServers()">← رجوع للسيرفرات</button>
+
+          <div class="system-header">
+            <img src="icons/memerate.png" class="system-icon" alt="">
+            <div>
+              <h2>نظام تقييم الميمز</h2>
+              <p>إدارة التصويت وحذف الميمز السيئة</p>
+            </div>
+          </div>
+
+          <div class="settings-container">
+            <!-- Config Card -->
+            <div class="card">
+              <h3>الإعدادات العامة</h3>
+
+              <div class="form-group">
+                <label>وضع الفحص</label>
+                <select id="mode-select">
+                  <option value="timed">مؤقت (يفحص بعد المدة)</option>
+                  <option value="continuous">مستمر (يفحص دورياً)</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>مدة التصويت (دقائق)</label>
+                <input type="number" id="duration-input" min="1" max="1440" value="10">
+              </div>
+
+              <div class="form-group" id="interval-group">
+                <label>فترة الفحص المستمر (ثواني)</label>
+                <input type="number" id="interval-input" min="5" max="3600" value="30">
+              </div>
+
+              <div class="form-group">
+                <label>إيموجي الإيجابي</label>
+                <input type="text" id="positive-emoji" value="✅">
+              </div>
+
+              <div class="form-group">
+                <label>إيموجي السلبي</label>
+                <input type="text" id="negative-emoji" value="❌">
+              </div>
+
+              <button class="btn primary" onclick="saveConfig()">حفظ الإعدادات</button>
+            </div>
+
+            <!-- Channels Card -->
+            <div class="card">
+              <h3>القنوات المراقبة</h3>
+              <div id="channels-list" class="channels-list"></div>
+
+              <div class="form-group">
+                <label>إضافة قناة</label>
+                <select id="add-channel-select">
+                  <option value="">اختر قناة...</option>
+                </select>
+                <button class="btn small" onclick="addChannel()">إضافة</button>
+              </div>
+            </div>
+
+            <!-- Log Channel Card -->
+            <div class="card">
+              <h3>قناة السجل</h3>
+              <div class="form-group">
+                <select id="log-channel-select">
+                  <option value="">بدون سجل</option>
+                </select>
+                <button class="btn small" onclick="saveLogChannel()">حفظ</button>
+              </div>
+            </div>
+
+            <!-- Leaderboard Card -->
+            <div class="card">
+              <h3>أسوأ الناشرين</h3>
+              <div id="leaderboard" class="leaderboard"></div>
+              <button class="btn danger small" onclick="resetAllStats()">إعادة تعيين الإحصائيات</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- GIF System -->
+        <section id="gif-page" class="page">
+          <button class="back-btn" onclick="showServers()">← رجوع للسيرفرات</button>
+
+          <div class="system-header">
+            <img src="icons/gif.png" class="system-icon" alt="">
+            <div>
+              <h2>نظام تحويل GIF</h2>
+              <p>تحويل الصور والفيديوهات إلى GIF تلقائياً</p>
+            </div>
+          </div>
+
+          <div class="settings-container">
+            <!-- GIF Settings Card -->
+            <div class="card">
+              <h3>إعدادات التحويل</h3>
+
+              <div class="form-group">
+                <label>التحويل التلقائي</label>
+                <select id="gif-auto-select">
+                  <option value="true">مُفعّل ✅</option>
+                  <option value="false">مُعطّل ❌</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>جودة GIF</label>
+                <select id="gif-quality-select">
+                  <option value="low">منخفضة (حجم أصغر)</option>
+                  <option value="medium">متوسطة</option>
+                  <option value="high">عالية (حجم أكبر)</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>مدة الفيديو (ثواني)</label>
+                <input type="number" id="gif-duration-input" min="1" max="15" value="5">
+              </div>
+
+              <button class="btn primary" onclick="saveGifConfig()">حفظ إعدادات GIF</button>
+            </div>
+
+            <!-- GIF Channels Card -->
+            <div class="card">
+              <h3>قنوات التحويل</h3>
+              <div id="gif-channels-list" class="channels-list"></div>
+
+              <div class="form-group">
+                <label>إضافة قناة</label>
+                <select id="add-gif-channel-select">
+                  <option value="">اختر قناة...</option>
+                </select>
+                <button class="btn small" onclick="addGifChannel()">إضافة</button>
+              </div>
+            </div>
+
+            <!-- GIF Info Card -->
+            <div class="card info-card">
+              <h3>معلومات</h3>
+              <div class="info-content">
+                <p><strong>الصيغ المدعومة:</strong></p>
+                <p>🖼️ صور: PNG, JPG, JPEG, WEBP</p>
+                <p>🎥 فيديو: MP4, WEBM, MOV, AVI</p>
+                <br>
+                <p><strong>ملاحظة:</strong></p>
+                <p>لتحويل الفيديوهات، يجب تثبيت ffmpeg على السيرفر</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Streak System -->
+        <section id="streak-page" class="page">
+          <button class="back-btn" onclick="showServers()">← رجوع للسيرفرات</button>
+
+          <div class="system-header">
+            <div class="system-icon-text">🔥</div>
+            <div>
+              <h2>نظام الستريك اليومي</h2>
+              <p>تتبع نشاط المستخدمين بإرسال الميديا يومياً</p>
+            </div>
+          </div>
+
+          <div class="settings-container">
+            <!-- Streak Channels Card -->
+            <div class="card">
+              <h3>قنوات الستريك</h3>
+              <p class="card-desc">أي رسالة ميديا (صورة/فيديو/ملصق/GIF) في هذه القنوات ستُحدّث الستريك</p>
+              <div id="streak-channels-list" class="channels-list"></div>
+
+              <div class="form-group">
+                <label>إضافة قناة</label>
+                <select id="add-streak-channel-select">
+                  <option value="">اختر قناة...</option>
+                </select>
+                <button class="btn small" onclick="addStreakChannel()">إضافة</button>
+              </div>
+            </div>
+
+            <!-- Streak Leaderboard Card -->
+            <div class="card">
+              <h3>🏆 ليدربورد الستريك</h3>
+              <div id="streak-leaderboard" class="leaderboard"></div>
+              <button class="btn small" onclick="loadStreakLeaderboard()">🔄 تحديث</button>
+            </div>
+
+            <!-- Streak Info Card -->
+            <div class="card info-card">
+              <h3>كيف يعمل النظام</h3>
+              <div class="info-content">
+                <p>✅ أرسل <strong>صورة/فيديو/ملصق/GIF</strong> يومياً</p>
+                <p>❌ الرسائل النصية <strong>لا تُحسب</strong></p>
+                <p>⏰ إذا فات يوم = الستريك يعود لـ <strong>0</strong></p>
+                <br>
+                <p>🏆 <strong>إنجازات:</strong></p>
+                <p>🔥 7 أيام = أسبوع كامل!</p>
+                <p>🔥 30 يوم = شهر كامل!</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Download System -->
+        <section id="download-page" class="page">
+          <button class="back-btn" onclick="showServers()">← رجوع للسيرفرات</button>
+
+          <div class="system-header">
+            <div class="system-icon-text">📥</div>
+            <div>
+              <h2>نظام تحميل الفيديوهات</h2>
+              <p>تحميل الفيديوهات من YouTube و TikTok و Instagram وغيرها</p>
+            </div>
+          </div>
+
+          <div class="settings-container">
+            <!-- Download Settings Card -->
+            <div class="card">
+              <h3>الإعدادات العامة</h3>
+
+              <div class="form-group">
+                <label>حالة التحميل</label>
+                <select id="download-enabled-select">
+                  <option value="true">مُفعّل ✅</option>
+                  <option value="false">مُعطّل ❌</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>الجودة الافتراضية</label>
+                <select id="download-quality-select">
+                  <option value="best">أفضل جودة</option>
+                  <option value="720">720p HD</option>
+                  <option value="480">480p</option>
+                  <option value="360">360p</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label>الحد الأقصى لحجم الملف (MB)</label>
+                <input type="number" id="max-file-size-input" min="10" max="500" value="100">
+                <small>الملفات الأكبر من هذا الحجم سيتم ضغطها أو تقديم رابط مباشر</small>
+              </div>
+
+              <div class="form-group">
+                <label>الضغط التلقائي</label>
+                <select id="auto-compress-select">
+                  <option value="true">مُفعّل ✅</option>
+                  <option value="false">مُعطّل ❌</option>
+                </select>
+                <small>ضغط الفيديوهات الكبيرة تلقائياً لتقليل الحجم</small>
+              </div>
+
+              <button class="btn primary" onclick="saveDownloadConfig()">حفظ إعدادات التحميل</button>
+            </div>
+
+            <!-- Download Channels Card -->
+            <div class="card">
+              <h3>القنوات المسموح فيها</h3>
+              <p class="card-desc">يمكن للمستخدمين تحميل الفيديوهات من هذه القنوات فقط</p>
+              <div id="download-channels-list" class="channels-list"></div>
+
+              <div class="form-group">
+                <label>إضافة قناة</label>
+                <select id="add-download-channel-select">
+                  <option value="">اختر قناة...</option>
+                </select>
+                <button class="btn small" onclick="addDownloadChannel()">إضافة</button>
+              </div>
+            </div>
+
+            <!-- Queue Status Card -->
+            <div class="card">
+              <h3>حالة طابور التحميل</h3>
+              <div id="queue-status" class="queue-status">
+                <div class="status-item">
+                  <span class="status-label">النشط:</span>
+                  <span class="status-value" id="active-downloads">0</span>
+                </div>
+                <div class="status-item">
+                  <span class="status-label">في الانتظار:</span>
+                  <span class="status-value" id="pending-downloads">0</span>
+                </div>
+                <div class="status-item">
+                  <span class="status-label">إجمالي اليوم:</span>
+                  <span class="status-value" id="total-downloads">0</span>
+                </div>
+              </div>
+              <button class="btn small" onclick="refreshQueueStatus()">🔄 تحديث</button>
+            </div>
+
+            <!-- Download Stats Card -->
+            <div class="card">
+              <h3>إحصائيات التحميل</h3>
+              <div id="download-stats" class="stats-grid">
+                <div class="stat-item">
+                  <div class="stat-number" id="downloads-today">0</div>
+                  <div class="stat-label">التحميلات اليوم</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-number" id="downloads-week">0</div>
+                  <div class="stat-label">التحميلات الأسبوع</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-number" id="downloads-total">0</div>
+                  <div class="stat-label">إجمالي التحميلات</div>
+                </div>
+                <div class="stat-item">
+                  <div class="stat-number" id="data-saved">0 GB</div>
+                  <div class="stat-label">البيانات المحفوظة</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Supported Platforms Card -->
+            <div class="card info-card">
+              <h3>المنصات المدعومة</h3>
+              <div class="platforms-grid">
+                <div class="platform-item">
+                  <div class="platform-icon">📺</div>
+                  <div class="platform-name">YouTube</div>
+                  <div class="platform-status">مدعوم بالكامل</div>
+                </div>
+                <div class="platform-item">
+                  <div class="platform-icon">🎵</div>
+                  <div class="platform-name">TikTok</div>
+                  <div class="platform-status">مدعوم بالكامل</div>
+                </div>
+                <div class="platform-item">
+                  <div class="platform-icon">📷</div>
+                  <div class="platform-name">Instagram</div>
+                  <div class="platform-status">مدعوم بالكامل</div>
+                </div>
+                <div class="platform-item">
+                  <div class="platform-icon">🐦</div>
+                  <div class="platform-name">Twitter/X</div>
+                  <div class="platform-status">مدعوم بالكامل</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+  <script src="app.js"></script>
+</body>
+
+</html>

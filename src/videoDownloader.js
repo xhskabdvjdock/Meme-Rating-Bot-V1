@@ -1,28 +1,25 @@
 /**
- * Video Downloader Module
- * تحميل الفيديوهات من YouTube, TikTok, Instagram
+ * Video Downloader Module - Using yt-dlp-exec
+ * تحميل الفيديوهات من YouTube, TikTok, Instagram وأكثر من 1000 موقع
+ * 
+ * Same technology used by professional Telegram bots!
  */
 
-const { spawn } = require('child_process');
+const ytdlp = require('yt-dlp-exec');
 const path = require('path');
 const fs = require('fs');
-const ffmpeg = require('fluent-ffmpeg');
 
 // إعدادات
 const TEMP_DIR = path.join(__dirname, '..', 'temp');
-const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB Discord limit
-const MAX_CONCURRENT_DOWNLOADS = 3;
+const MAX_FILE_SIZE = 678 * 1024 * 1024; // 100MB limit for large files
 
 // أنماط الروابط المدعومة
 const URL_PATTERNS = {
     youtube: /(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/(?:watch\?v=|shorts\/)|youtu\.be\/)[\w-]+/gi,
     tiktok: /(?:https?:\/\/)?(?:www\.)?(?:vm\.)?tiktok\.com\/[@\w\/-]+/gi,
     instagram: /(?:https?:\/\/)?(?:www\.)?instagram\.com\/(?:reel|p)\/[\w-]+/gi,
+    twitter: /(?:https?:\/\/)?(?:www\.)?(?:twitter\.com|x\.com)\/\w+\/status\/\d+/gi,
 };
-
-// Queue للتحميلات
-const downloadQueue = [];
-let activeDownloads = 0;
 
 // إنشاء مجلد temp إذا لم يكن موجوداً
 if (!fs.existsSync(TEMP_DIR)) {
@@ -30,9 +27,39 @@ if (!fs.existsSync(TEMP_DIR)) {
 }
 
 /**
+ * تنسيق الوقت (ثواني -> HH:MM:SS)
+ */
+function formatDuration(duration) {
+    if (!duration) return '00:00';
+    const seconds = Math.floor(duration);
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+
+    const mDisplay = m < 10 ? `0${m}` : m;
+    const sDisplay = s < 10 ? `0${s}` : s;
+
+    if (h > 0) {
+        return `${h}:${mDisplay}:${sDisplay}`;
+    }
+    return `${mDisplay}:${sDisplay}`;
+}
+
+/**
+ * الحصول على اسم المنصة
+ */
+function getPlatformName(platform) {
+    const names = {
+        youtube: 'YouTube',
+        tiktok: 'TikTok',
+        instagram: 'Instagram',
+        twitter: 'Twitter/X',
+    };
+    return names[platform] || platform;
+}
+
+/**
  * اكتشاف روابط الفيديو في النص
- * @param {string} content - محتوى الرسالة
- * @returns {Array<{platform: string, url: string}>}
  */
 function detectVideoUrls(content) {
     const results = [];
@@ -41,7 +68,6 @@ function detectVideoUrls(content) {
         const matches = content.match(pattern);
         if (matches) {
             for (const url of matches) {
-                // تأكد أن الرابط يبدأ بـ http
                 const fullUrl = url.startsWith('http') ? url : `https://${url}`;
                 results.push({ platform, url: fullUrl });
             }
@@ -52,325 +78,429 @@ function detectVideoUrls(content) {
 }
 
 /**
- * الحصول على معلومات الفيديو باستخدام yt-dlp
- * @param {string} url - رابط الفيديو
- * @returns {Promise<object>}
+ * الحصول على معلومات الفيديو من yt-dlp
  */
-function getVideoInfo(url) {
-    return new Promise((resolve, reject) => {
-        const args = [
-            '--dump-json',
-            '--no-warnings',
-            '--no-playlist',
-            url,
-        ];
+async function getVideoInfo(url) {
+    try {
+        console.log(`[yt-dlp] Fetching info for: ${url}`);
 
-        const process = spawn('yt-dlp', args);
-        let stdout = '';
-        let stderr = '';
-
-        process.stdout.on('data', (data) => {
-            stdout += data.toString();
+        const info = await ytdlp(url, {
+            dumpSingleJson: true,
+            noWarnings: true,
+            noCheckCertificate: true,
+            preferFreeFormats: true,
+            // Use Android client to bypass bot detection
+            extractorArgs: 'youtube:player_client=android',
         });
 
-        process.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
+        return {
+            title: info.title || 'video',
+            thumbnail: info.thumbnail || null,
+            duration: info.duration || 0,
+            author: info.uploader || info.channel || 'Unknown',
+            url: url
+        };
+    } catch (error) {
+        console.error(`[yt-dlp] Failed to get video info:`, error.message);
 
-        process.on('close', (code) => {
-            if (code !== 0) {
-                console.error(`[VideoDownloader] yt-dlp info error: ${stderr}`);
-                reject(new Error('فشل في جلب معلومات الفيديو'));
-                return;
-            }
-
-            try {
-                const info = JSON.parse(stdout);
-                resolve({
-                    title: info.title || 'Unknown',
-                    thumbnail: info.thumbnail || null,
-                    duration: info.duration || 0,
-                    author: info.uploader || info.channel || 'Unknown',
-                    description: info.description?.substring(0, 200) || '',
-                });
-            } catch (e) {
-                reject(new Error('فشل في تحليل معلومات الفيديو'));
-            }
-        });
-
-        process.on('error', (err) => {
-            console.error(`[VideoDownloader] yt-dlp spawn error:`, err);
-            reject(new Error('yt-dlp غير مثبت أو غير موجود في PATH'));
-        });
-    });
+        // Return basic info if metadata fetch fails
+        return {
+            title: 'فيديو',
+            thumbnail: null,
+            duration: 0,
+            author: 'غير معروف',
+            url: url
+        };
+    }
 }
 
 /**
- * تحميل الفيديو
- * @param {string} url - رابط الفيديو
- * @param {string} format - 'mp4' أو 'mp3'
- * @param {string} quality - '720' أو '480' أو 'best'
- * @returns {Promise<string>} - مسار الملف
+ * التحقق من حجم الملف قبل التحميل
  */
-function downloadVideo(url, format = 'mp4', quality = 'best') {
-    return new Promise((resolve, reject) => {
-        const filename = `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const outputPath = path.join(TEMP_DIR, `${filename}.%(ext)s`);
+async function checkFileSize(url, format = 'mp4', quality = 'best') {
+    try {
+        console.log(`[yt-dlp] Checking file size: ${url} (${format}, ${quality})`);
 
-        let args = [];
+        let formatFilter;
 
+        // Audio-only mode
         if (format === 'mp3') {
-            // تحميل الصوت فقط
-            args = [
-                '-x',
-                '--audio-format', 'mp3',
-                '--audio-quality', '192K',
-                '-o', outputPath,
-                '--no-warnings',
-                '--no-playlist',
-                url,
-            ];
+            formatFilter = 'bestaudio';
         } else {
-            // تحميل الفيديو
-            let formatSpec = 'best[ext=mp4]/best';
-            if (quality === '720') {
-                formatSpec = 'best[height<=720][ext=mp4]/best[height<=720]/best';
+            // Video mode with quality selection
+            if (quality === 'best') {
+                formatFilter = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+            } else if (quality === '720') {
+                formatFilter = `bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]`;
             } else if (quality === '480') {
-                formatSpec = 'best[height<=480][ext=mp4]/best[height<=480]/best';
+                formatFilter = `bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]`;
+            } else if (quality === '360') {
+                formatFilter = `bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]`;
             }
-
-            args = [
-                '-f', formatSpec,
-                '--merge-output-format', 'mp4',
-                '-o', outputPath,
-                '--no-warnings',
-                '--no-playlist',
-                url,
-            ];
         }
 
-        console.log(`[VideoDownloader] Starting download: ${url} (${format}, ${quality})`);
-
-        const process = spawn('yt-dlp', args);
-        let stderr = '';
-
-        process.stderr.on('data', (data) => {
-            stderr += data.toString();
+        const info = await ytdlp(url, {
+            dumpSingleJson: true,
+            format: formatFilter,
+            noWarnings: true,
+            noCheckCertificate: true,
+            extractorArgs: 'youtube:player_client=android',
         });
 
-        process.on('close', (code) => {
-            if (code !== 0) {
-                console.error(`[VideoDownloader] Download failed: ${stderr}`);
-                reject(new Error('فشل في التحميل'));
-                return;
-            }
+        const filesize = info.filesize || info.filesize_approx || 0;
+        console.log(`[yt-dlp] Estimated file size: ${(filesize / 1024 / 1024).toFixed(2)}MB`);
 
-            // البحث عن الملف المحمّل
-            const ext = format === 'mp3' ? 'mp3' : 'mp4';
-            const expectedPath = path.join(TEMP_DIR, `${filename}.${ext}`);
+        return {
+            filesize: filesize,
+            title: info.title || 'video',
+            duration: info.duration || 0,
+            willExceedLimit: filesize > MAX_FILE_SIZE
+        };
 
-            // yt-dlp قد يستخدم امتدادات مختلفة
-            const files = fs.readdirSync(TEMP_DIR).filter(f => f.startsWith(filename));
-
-            if (files.length === 0) {
-                reject(new Error('لم يتم العثور على الملف المحمّل'));
-                return;
-            }
-
-            const downloadedFile = path.join(TEMP_DIR, files[0]);
-            console.log(`[VideoDownloader] Download complete: ${downloadedFile}`);
-            resolve(downloadedFile);
-        });
-
-        process.on('error', (err) => {
-            console.error(`[VideoDownloader] Spawn error:`, err);
-            reject(new Error('yt-dlp غير مثبت'));
-        });
-    });
+    } catch (error) {
+        console.error(`[yt-dlp] Failed to check file size:`, error.message);
+        return {
+            filesize: 0,
+            title: 'video',
+            duration: 0,
+            willExceedLimit: false
+        };
+    }
 }
 
 /**
- * تحويل الفيديو إلى mp3
- * @param {string} videoPath - مسار الفيديو
- * @returns {Promise<string>} - مسار الـ mp3
+ * تحميل الفيديو باستخدام yt-dlp
  */
-function convertToMp3(videoPath) {
-    return new Promise((resolve, reject) => {
-        const outputPath = videoPath.replace(/\.[^.]+$/, '.mp3');
+async function downloadVideo(url, format = 'mp4', quality = 'best') {
+    try {
+        const filename = `download_${Date.now()}`;
+        const outputTemplate = path.join(TEMP_DIR, `${filename}.%(ext)s`);
 
-        console.log(`[VideoDownloader] Converting to MP3: ${videoPath}`);
+        console.log(`[yt-dlp] Downloading: ${url} (${format}, ${quality})`);
 
-        ffmpeg(videoPath)
-            .toFormat('mp3')
-            .audioBitrate('192k')
-            .on('end', () => {
-                console.log(`[VideoDownloader] Conversion complete: ${outputPath}`);
-                // حذف الفيديو الأصلي
-                fs.unlink(videoPath, () => { });
-                resolve(outputPath);
-            })
-            .on('error', (err) => {
-                console.error(`[VideoDownloader] Conversion error:`, err);
-                reject(new Error('فشل في التحويل إلى MP3'));
-            })
-            .save(outputPath);
-    });
+        let options = {
+            output: outputTemplate,
+            noWarnings: true,
+            noCheckCertificate: true,
+            preferFreeFormats: true,
+            // Use Android client to bypass YouTube bot detection
+            extractorArgs: 'youtube:player_client=android',
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36'
+            ],
+        };
+
+        // Audio-only mode
+        if (format === 'mp3') {
+            options.extractAudio = true;
+            options.audioFormat = 'mp3';
+            options.audioQuality = '192K';
+            options.ffmpegLocation = 'C:\\ffmpeg-8.0.1-essentials_build\\bin';
+        } else {
+            // Video mode with quality selection
+            if (quality === 'best') {
+                options.format = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+            } else if (quality === '720') {
+                options.format = `bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]`;
+            } else if (quality === '480') {
+                options.format = `bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]`;
+            } else if (quality === '360') {
+                options.format = `bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]`;
+            }
+
+            // Merge to mp4
+            options.mergeOutputFormat = 'mp4';
+            options.remuxVideo = 'mp4';
+            options.ffmpegLocation = 'C:\\ffmpeg-8.0.1-essentials_build\\bin';
+        }
+
+        await ytdlp(url, options);
+
+        // Find the downloaded file
+        const files = fs.readdirSync(TEMP_DIR);
+        const downloadedFile = files.find(f => f.startsWith(filename));
+
+        if (!downloadedFile) {
+            throw new Error('لم يتم العثور على الملف المحمل');
+        }
+
+        const filepath = path.join(TEMP_DIR, downloadedFile);
+        console.log(`[yt-dlp] Downloaded to: ${filepath}`);
+
+        return filepath;
+
+    } catch (error) {
+        console.error(`[yt-dlp] Download failed:`, error.message);
+
+        if (error.message.includes('Unsupported URL')) {
+            throw new Error('الرابط غير مدعوم. جرب رابط من YouTube أو TikTok أو Instagram');
+        }
+        if (error.message.includes('Video unavailable')) {
+            throw new Error('الفيديو غير متوفر أو محذوف');
+        }
+        if (error.message.includes('Private video')) {
+            throw new Error('الفيديو خاص ولا يمكن تحميله');
+        }
+
+        throw new Error(error.message || 'فشل في التحميل');
+    }
 }
 
 /**
- * ضغط الفيديو لتصغير الحجم
- * @param {string} filePath - مسار الملف
- * @param {number} targetSize - الحجم المستهدف بالبايت
- * @returns {Promise<string>}
+ * الحصول على رابط تحميل مباشر (بدون تحميل الملف)
+ * مفيد للملفات الكبيرة التي تتجاوز حد Discord
  */
-function compressVideo(filePath, targetSize = MAX_FILE_SIZE) {
-    return new Promise((resolve, reject) => {
-        const stat = fs.statSync(filePath);
+async function getDirectDownloadUrl(url, format = 'mp4', quality = 'best') {
+    try {
+        console.log(`[yt-dlp] Getting direct download URL: ${url} (${format}, ${quality})`);
 
-        // إذا الملف صغير كفاية، لا داعي للضغط
-        if (stat.size <= targetSize) {
-            resolve(filePath);
-            return;
+        let formatFilter;
+
+        // Audio-only mode
+        if (format === 'mp3') {
+            formatFilter = 'bestaudio[ext=mp3]/bestaudio';
+            console.log(`[yt-dlp] Requesting MP3 format with filter: ${formatFilter}`);
+        } else {
+            // Video mode with quality selection
+            if (quality === 'best') {
+                formatFilter = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+            } else if (quality === '720') {
+                formatFilter = `bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]`;
+            } else if (quality === '480') {
+                formatFilter = `bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]`;
+            } else if (quality === '360') {
+                formatFilter = `bestvideo[height<=360][ext=mp4]+bestaudio[ext=m4a]/best[height<=360][ext=mp4]/best[height<=360]`;
+            }
         }
 
-        console.log(`[VideoDownloader] Compressing video (${(stat.size / 1024 / 1024).toFixed(2)}MB)`);
+        const info = await ytdlp(url, {
+            dumpSingleJson: true,
+            format: formatFilter,
+            noWarnings: true,
+            noCheckCertificate: true,
+            // Use Android client to bypass bot detection
+            extractorArgs: 'youtube:player_client=android',
+        });
 
-        const outputPath = filePath.replace(/\.mp4$/, '_compressed.mp4');
+        // Get the direct URL - prioritize the format filter result
+        let directUrl = null;
 
-        // حساب bitrate تقريبي للوصول للحجم المطلوب
-        // نستخدم probe للحصول على المدة
-        ffmpeg.ffprobe(filePath, (err, metadata) => {
-            if (err) {
-                reject(new Error('فشل في تحليل الفيديو'));
-                return;
+        // First try to get URL from the format we requested
+        if (info.requested_formats && info.requested_formats.length > 0) {
+            // Use the first requested format that matches our quality
+            const requestedFormat = info.requested_formats.find(f => 
+                f.ext === (format === 'mp3' ? 'mp3' : 'mp4')
+            );
+            if (requestedFormat) {
+                directUrl = requestedFormat.url;
+                const formatInfo = format === 'mp3' ? 
+                    `${requestedFormat.abr || 'unknown'}kbps MP3` : 
+                    `${requestedFormat.height || 'unknown'}p ${requestedFormat.ext}`;
+                console.log(`[yt-dlp] Using requested format: ${formatInfo}`);
             }
+        }
 
-            const duration = metadata.format.duration || 60;
-            // الحجم المستهدف بالـ bits، مع هامش أمان 10%
-            const targetBits = (targetSize * 8 * 0.9);
-            const targetBitrate = Math.floor(targetBits / duration / 1000); // kbps
+        // If no requested format, try to find matching format from all formats
+        if (!directUrl) {
+            if (format === 'mp3') {
+                // Find best audio format
+                const audioFormat = info.formats?.find(f => 
+                    f.acodec !== 'none' && (f.ext === 'mp3' || f.ext === 'm4a')
+                );
+                if (audioFormat) {
+                    directUrl = audioFormat.url;
+                    console.log(`[yt-dlp] Found audio format: ${audioFormat.abr || 'unknown'}kbps ${audioFormat.ext}`);
+                }
+            } else if (info.formats && info.formats.length > 0) {
+                // Find best format matching our criteria
+                let targetFormat = null;
+                
+                if (quality === 'best') {
+                    // Find best mp4 format
+                    targetFormat = info.formats.find(f => 
+                        f.ext === 'mp4' && f.vcodec !== 'none' && f.acodec !== 'none'
+                    ) || info.formats.find(f => f.ext === 'mp4');
+                } else if (quality === '720') {
+                    targetFormat = info.formats.find(f => 
+                        f.height <= 720 && f.ext === 'mp4' && f.vcodec !== 'none'
+                    );
+                } else if (quality === '480') {
+                    targetFormat = info.formats.find(f => 
+                        f.height <= 480 && f.ext === 'mp4' && f.vcodec !== 'none'
+                    );
+                } else if (quality === '360') {
+                    targetFormat = info.formats.find(f => 
+                        f.height <= 360 && f.ext === 'mp4' && f.vcodec !== 'none'
+                    );
+                }
+                
+                if (targetFormat) {
+                    directUrl = targetFormat.url;
+                    console.log(`[yt-dlp] Found matching format: ${targetFormat.height}p ${targetFormat.ext} (${targetFormat.vcodec})`);
+                } else {
+                    console.log(`[yt-dlp] No matching format found for quality ${quality}`);
+                }
+            }
+        }
 
-            // الحد الأدنى للجودة
-            const finalBitrate = Math.max(500, Math.min(targetBitrate, 2000));
+        // Fallback to default URL
+        if (!directUrl) {
+            directUrl = info.url;
+            console.log(`[yt-dlp] Using fallback URL for quality ${quality}`);
+        }
 
+        console.log(`[yt-dlp] Got direct URL for ${quality} quality (expires in ~6 hours)`);
+
+        return {
+            url: directUrl,
+            title: info.title || 'video',
+            filesize: info.filesize || info.filesize_approx || 0,
+            ext: info.ext || (format === 'mp3' ? 'mp3' : 'mp4')
+        };
+
+    } catch (error) {
+        console.error(`[yt-dlp] Failed to get direct URL:`, error.message);
+        throw new Error('فشل في الحصول على رابط التحميل');
+    }
+}
+
+/**
+ * تحويل فيديو إلى MP3 (not needed with yt-dlp, keeping for compatibility)
+ */
+async function convertToMp3(videoPath) {
+    // yt-dlp handles this automatically
+    return videoPath;
+}
+
+/**
+ * ضغط الفيديو تلقائياً للملفات الكبيرة
+ */
+async function autoCompressVideo(filePath, targetSizeMB = 50) {
+    try {
+        const currentSize = getFileSize(filePath);
+        const currentSizeMB = currentSize / 1024 / 1024;
+        
+        console.log(`[Compression] Current size: ${currentSizeMB.toFixed(2)}MB, Target: ${targetSizeMB}MB`);
+        
+        if (currentSizeMB <= targetSizeMB) {
+            console.log('[Compression] File size is acceptable, no compression needed');
+            return filePath;
+        }
+
+        const filename = `compressed_${Date.now()}.mp4`;
+        const outputPath = path.join(TEMP_DIR, filename);
+        
+        // Use ffmpeg for compression (more reliable than yt-dlp for this task)
+        const ffmpeg = require('fluent-ffmpeg');
+        ffmpeg.setFfmpegPath('C:\\ffmpeg-8.0.1-essentials_build\\bin\\ffmpeg.exe');
+        ffmpeg.setFfprobePath('C:\\ffmpeg-8.0.1-essentials_build\\bin\\ffprobe.exe');
+        
+        return new Promise((resolve, reject) => {
             ffmpeg(filePath)
-                .videoBitrate(`${finalBitrate}k`)
+                .output(outputPath)
+                .videoCodec('libx264')
+                .audioCodec('aac')
                 .audioBitrate('128k')
-                .size('?x480') // تصغير الدقة
+                .videoBitrate('1000k') // Target 1Mbps
+                .size('?x720') // Max height 720p
+                .format('mp4')
                 .on('end', () => {
-                    console.log(`[VideoDownloader] Compression complete: ${outputPath}`);
-                    // حذف الملف الأصلي
-                    fs.unlink(filePath, () => { });
+                    console.log('[Compression] Compression completed');
+                    const compressedSize = getFileSize(outputPath);
+                    const compressedSizeMB = compressedSize / 1024 / 1024;
+                    console.log(`[Compression] Compressed size: ${compressedSizeMB.toFixed(2)}MB`);
+                    
+                    // Delete original file
+                    deleteFile(filePath);
                     resolve(outputPath);
                 })
                 .on('error', (err) => {
-                    console.error(`[VideoDownloader] Compression error:`, err);
-                    reject(new Error('فشل في ضغط الفيديو'));
+                    console.error('[Compression] Error:', err.message);
+                    resolve(filePath); // Return original if compression fails
                 })
-                .save(outputPath);
+                .run();
         });
-    });
+        
+    } catch (error) {
+        console.error('[Compression] Error:', error.message);
+        return filePath; // Return original if compression fails
+    }
 }
 
 /**
- * التحقق من حجم الملف
- * @param {string} filePath 
- * @returns {number} - الحجم بالبايت
+ * ضغط الفيديو (not needed with quality selection, keeping for compatibility)
+ */
+async function compressVideo(videoPath) {
+    console.log('[yt-dlp] Compression handled by quality selection');
+    return videoPath;
+}
+
+/**
+ * الحصول على حجم الملف
  */
 function getFileSize(filePath) {
     try {
-        return fs.statSync(filePath).size;
-    } catch {
+        const stats = fs.statSync(filePath);
+        return stats.size;
+    } catch (error) {
+        console.error('[yt-dlp] Error getting file size:', error);
         return 0;
     }
 }
 
 /**
- * حذف ملف مؤقت
- * @param {string} filePath 
+ * حذف ملف
  */
 function deleteFile(filePath) {
     try {
         if (fs.existsSync(filePath)) {
             fs.unlinkSync(filePath);
-            console.log(`[VideoDownloader] Deleted temp file: ${filePath}`);
+            console.log(`[yt-dlp] Deleted: ${filePath}`);
         }
-    } catch (err) {
-        console.error(`[VideoDownloader] Failed to delete file:`, err);
+    } catch (error) {
+        console.error(`[yt-dlp] Error deleting file:`, error);
     }
 }
 
 /**
- * تنظيف جميع الملفات المؤقتة القديمة (أكثر من ساعة)
+ * تنظيف مجلد temp من الملفات القديمة
  */
-function cleanupTempFiles() {
+function cleanupTempDir() {
     try {
         const files = fs.readdirSync(TEMP_DIR);
-        const oneHourAgo = Date.now() - 3600000;
-        let cleaned = 0;
+        const now = Date.now();
+        const maxAge = 60 * 60 * 1000; // 1 hour
 
         for (const file of files) {
             const filePath = path.join(TEMP_DIR, file);
-            const stat = fs.statSync(filePath);
+            const stats = fs.statSync(filePath);
 
-            if (stat.mtimeMs < oneHourAgo) {
-                fs.unlinkSync(filePath);
-                cleaned++;
+            if (now - stats.mtimeMs > maxAge) {
+                deleteFile(filePath);
             }
         }
-
-        if (cleaned > 0) {
-            console.log(`[VideoDownloader] Cleaned up ${cleaned} temp files`);
-        }
-    } catch (err) {
-        console.error(`[VideoDownloader] Cleanup error:`, err);
+    } catch (error) {
+        console.error('[yt-dlp] Cleanup error:', error);
     }
 }
 
-/**
- * تنسيق المدة بشكل قابل للقراءة
- * @param {number} seconds 
- * @returns {string}
- */
-function formatDuration(seconds) {
-    if (!seconds || seconds === 0) return 'غير معروف';
-
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-
-    if (mins === 0) return `${secs}ث`;
-    return `${mins}د ${secs}ث`;
-}
-
-/**
- * الحصول على اسم المنصة بالعربي
- * @param {string} platform 
- * @returns {string}
- */
-function getPlatformName(platform) {
-    const names = {
-        youtube: 'يوتيوب',
-        tiktok: 'تيك توك',
-        instagram: 'انستغرام',
-    };
-    return names[platform] || platform;
-}
-
-// تنظيف دوري كل 30 دقيقة
-setInterval(cleanupTempFiles, 1800000);
+// Auto-cleanup every 30 minutes
+setInterval(cleanupTempDir, 30 * 60 * 1000);
 
 module.exports = {
     detectVideoUrls,
     getVideoInfo,
+    checkFileSize,
     downloadVideo,
+    getDirectDownloadUrl,
     convertToMp3,
     compressVideo,
+    autoCompressVideo,
     getFileSize,
     deleteFile,
-    cleanupTempFiles,
-    formatDuration,
     getPlatformName,
+    formatDuration,
     MAX_FILE_SIZE,
-    TEMP_DIR,
-    URL_PATTERNS,
+    TEMP_DIR
 };

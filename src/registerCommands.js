@@ -67,9 +67,69 @@ const memerate = new SlashCommandBuilder()
       )
   );
 
+const download = new SlashCommandBuilder()
+  .setName("download")
+  .setDescription("إدارة ميزة تحميل الفيديوهات")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .addSubcommand((sc) =>
+    sc
+      .setName("status")
+      .setDescription("عرض إعدادات ميزة التحميل")
+  )
+  .addSubcommand((sc) =>
+    sc
+      .setName("toggle")
+      .setDescription("تفعيل أو تعطيل ميزة التحميل")
+      .addBooleanOption((opt) =>
+        opt
+          .setName("enabled")
+          .setDescription("تفعيل (true) أو تعطيل (false)")
+          .setRequired(true)
+      )
+  )
+  .addSubcommand((sc) =>
+    sc
+      .setName("addchannel")
+      .setDescription("إضافة قناة لقائمة القنوات المسموح فيها التحميل")
+      .addChannelOption((opt) =>
+        opt
+          .setName("channel")
+          .setDescription("القناة المراد إضافتها")
+          .setRequired(true)
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      )
+  )
+  .addSubcommand((sc) =>
+    sc
+      .setName("removechannel")
+      .setDescription("إزالة قناة من قائمة القنوات المسموح فيها التحميل")
+      .addChannelOption((opt) =>
+        opt
+          .setName("channel")
+          .setDescription("القناة المراد إزالتها")
+          .setRequired(true)
+          .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+      )
+  )
+  .addSubcommand((sc) =>
+    sc
+      .setName("setchannels")
+      .setDescription("تحديد نمط القنوات (كل القنوات أو محددة)")
+      .addStringOption((opt) =>
+        opt
+          .setName("mode")
+          .setDescription("اختر النمط")
+          .setRequired(true)
+          .addChoices(
+            { name: "كل القنوات", value: "all" },
+            { name: "قنوات محددة فقط", value: "specific" }
+          )
+      )
+  );
+
 async function main() {
   const rest = new REST({ version: "10" }).setToken(token);
-  const commands = [memerate.toJSON()];
+  const commands = [memerate.toJSON(), download.toJSON()];
   await rest.put(Routes.applicationCommands(clientId), { body: commands });
   console.log("Registered slash commands globally.");
 }
